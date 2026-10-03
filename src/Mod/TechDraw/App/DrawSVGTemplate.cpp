@@ -77,31 +77,50 @@ PyObject *DrawSVGTemplate::getPyObject()
 void DrawSVGTemplate::onChanged(const App::Property* prop)
 {
     if (prop == &Template && !isRestoring()) {
-        // PropertyString ignores assigning the current path, so this is not a
-        // same-file refresh. Keep values for editable names that still exist,
-        // including empty strings. New names take the template default. Names
-        // that the new file does not have are dropped. An empty path does not
-        // load a file; that still resets texts from the embedded SVG.
-        const std::map<std::string, std::string> oldTexts = EditableTexts.getValues();
-        const std::string newTemplate = Template.getValue();
-        replaceFileIncluded(newTemplate);
-        std::map<std::string, std::string> newTexts = getEditableTextsFromTemplate();
-        if (!newTemplate.empty()) {
-            for (auto& item : newTexts) {
-                auto it = oldTexts.find(item.first);
-                if (it != oldTexts.end()) {
-                    item.second = it->second;
-                }
+        // PropertyString ignores assigning the current path, so a same-file
+        // refresh is reloadTemplate(). An empty path does not load a file;
+        // that still resets texts from the embedded SVG.
+        if (std::string(Template.getValue()).empty()) {
+            replaceFileIncluded(std::string());
+            EditableTexts.setValues(getEditableTextsFromTemplate());
+            QDomDocument templateDocument;
+            if (getTemplateDocument(PageResult.getValue(), templateDocument)) {
+                extractTemplateAttributes(templateDocument);
             }
         }
-        EditableTexts.setValues(newTexts);
-        QDomDocument templateDocument;
-        if (getTemplateDocument(PageResult.getValue(), templateDocument)) {
-            extractTemplateAttributes(templateDocument);
+        else {
+            reloadTemplate();
         }
     }
 
     TechDraw::DrawTemplate::onChanged(prop);
+}
+
+void DrawSVGTemplate::reloadTemplate()
+{
+    // Same merge as a path change. The path does not have to be different.
+    // An empty path must not reset the editable texts.
+    const std::string path = Template.getValue();
+    if (path.empty()) {
+        return;
+    }
+
+    // Keep values for names that still exist, including empty strings.
+    // New names take the template default. Names the file does not have are dropped.
+    const std::map<std::string, std::string> oldTexts = EditableTexts.getValues();
+    replaceFileIncluded(path);
+    std::map<std::string, std::string> newTexts = getEditableTextsFromTemplate();
+    for (auto& item : newTexts) {
+        auto it = oldTexts.find(item.first);
+        if (it != oldTexts.end()) {
+            item.second = it->second;
+        }
+    }
+    EditableTexts.setValues(newTexts);
+    QDomDocument templateDocument;
+    if (getTemplateDocument(PageResult.getValue(), templateDocument)) {
+        extractTemplateAttributes(templateDocument);
+    }
 }
 
 void DrawSVGTemplate::onSettingDocument()
