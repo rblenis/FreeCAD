@@ -1,0 +1,155 @@
+# Fork-only. Never intended for FreeCAD/FreeCAD PRs.
+# Builds an FEM-ON Linux AppImage from rsb-weekly-wip and publishes a prerelease
+# on rblenis/FreeCAD. Optional rebase onto upstream releases/FreeCAD-26-3.
+#
+# Schedule only runs from the repo default branch. Until this file is also on
+# `main`, use Actions → RSB 26.3 AppImage → Run workflow (branch rsb-weekly-wip).
+name: RSB 26.3 AppImage
+
+on:
+  workflow_dispatch:
+    inputs:
+      rebase:
+        description: Rebase rsb-weekly-wip onto upstream/releases/FreeCAD-26-3 (force-with-lease)
+        type: boolean
+        default: true
+      build:
+        description: Pack Linux AppImage and publish a prerelease
+        type: boolean
+        default: true
+  push:
+    branches: [rsb-weekly-wip]
+    paths-ignore:
+      - "**.md"
+      - "AGENTS.md"
+  schedule:
+    # Daily 12:00 UTC. No-op unless this workflow file exists on the default branch.
+    - cron: "0 12 * * *"
+
+concurrency:
+  group: rsb-26-3-appimage
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+jobs:
+  rebase:
+    if: github.repository == 'rblenis/FreeCAD' && (github.event_name != 'workflow_dispatch' || inputs.rebase)
+    runs-on: ubuntu-latest
+    outputs:
+      sha: ${{ steps.sha.outputs.sha }}
+      rebased: ${{ steps.sha.outputs.rebased }}
+    steps:
+      - name: Checkout rsb-weekly-wip
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: rsb-weekly-wip
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Rebase onto upstream 26.3
+        id: sha
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git config user.name "github-actions[bot]"
+          git remote add upstream https://github.com/FreeCAD/FreeCAD.git
+          git fetch --no-tags origin rsb-weekly-wip
+          git fetch --no-tags upstream releases/FreeCAD-26-3
+          git checkout -B rsb-weekly-wip origin/rsb-weekly-wip
+          before=$(git rev-parse HEAD)
+          if git merge-base --is-ancestor upstream/releases/FreeCAD-26-3 HEAD; then
+            echo "Already based on current 26.3 ($(git rev-parse --short upstream/releases/FreeCAD-26-3))"
+            echo "rebased=false" >> "$GITHUB_OUTPUT"
+          else
+            git rebase upstream/releases/FreeCAD-26-3
+            git push --force-with-lease origin rsb-weekly-wip
+            echo "rebased=true" >> "$GITHUB_OUTPUT"
+          fi
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "HEAD $(git rev-parse --short HEAD) (was $(echo "$before" | cut -c1-10))"
+
+  pack:
+    needs: rebase
+    if: |
+      always() &&
+      github.repository == 'rblenis/FreeCAD' &&
+      (needs.rebase.result == 'success' || needs.rebase.result == 'skipped') &&
+      (github.event_name != 'workflow_dispatch' || inputs.build)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 360
+    env:
+      HOST: x86_64-linux-gnu
+      APPIMAGE_EXTRACT_AND_RUN: "1"
+    steps:
+      - name: Maximize build space
+        uses: AdityaGarg8/remove-unwanted-software@90e01b21170618765a73370fcc3abbd1684a7793 # v5
+        with:
+          verbose: "true"
+          remove-android: "true"
+          remove-cached-tools: "true"
+
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ needs.rebase.outputs.sha || 'rsb-weekly-wip' }}
+          fetch-depth: 2
+          submodules: recursive
+
+      - name: Tag
+        id: tag
+        run: |
+          set -euo pipefail
+          echo "BUILD_TAG=rsb-26.3-$(date -u +%Y%m%d)" >> "$GITHUB_ENV"
+          echo "BUILD_TAG=rsb-26.3-$(date -u +%Y%m%d)" >> "$GITHUB_OUTPUT"
+
+      - uses: prefix-dev/setup-pixi@d3f436a425481402e6a95a1d1fc10331c708cd9e # v0.10.2
+        with:
+          pixi-version: v0.81.0
+          cache: false
+          locked: true
+
+      - name: ccache
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: .ccache
+          key: rsb-26-3-ccache-${{ github.sha }}
+          restore-keys: |
+            rsb-26-3-ccache-
+
+      - name: Configure and build
+        env:
+          BUILD_TAG: ${{ env.BUILD_TAG }}
+          CCACHE_DIR: ${{ github.workspace }}/.ccache
+        run: |
+          set -euo pipefail
+          mkdir -p "$CCACHE_DIR"
+          python3 package/scripts/write_version_info.py ../freecad_version.txt
+          pixi run --locked bash package/bundle/build.sh
+
+      - name: Create GitHub prerelease
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BUILD_TAG: ${{ env.BUILD_TAG }}
+        run: |
+          set -euo pipefail
+          gh release create "$BUILD_TAG" \
+            --target "${{ github.sha }}" \
+            --title "rsb 26.3 $BUILD_TAG" \
+            --notes "Patched 26.3 AppImage from \`rsb-weekly-wip\` ($(git rev-parse --short HEAD)). FEM ON. Not an official FreeCAD build." \
+            --prerelease \
+            || gh release view "$BUILD_TAG" >/dev/null
+
+      - name: Pack AppImage
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BUILD_TAG: ${{ env.BUILD_TAG }}
+          UPLOAD_RELEASE: "true"
+          HOST: x86_64-linux-gnu
+          APPIMAGE_EXTRACT_AND_RUN: "1"
+        run: |
+          set -euo pipefail
+          pixi run --locked bash -c 'cd package/bundle/linux && bash create_bundle.sh'
