@@ -9,6 +9,10 @@ mkdir -p ${conda_env}
 
 cp -a ../../../.pixi/envs/default/* ${conda_env}
 
+# Weekly-only. AppRun sets FONTCONFIG_FILE to this path.
+mkdir -p ${conda_env}/etc/fonts
+cp "$(dirname "$0")/freecad.conf" ${conda_env}/etc/fonts/freecad.conf
+
 echo -e "\nDelete unnecessary stuff"
 rm -rf ${conda_env}/include
 find ${conda_env} -name \*.a -delete
