@@ -2,8 +2,7 @@
 # Builds an FEM-ON Linux AppImage from rsb-weekly-wip and publishes a prerelease
 # on rblenis/FreeCAD. Optional rebase onto upstream releases/FreeCAD-26-3.
 #
-# Schedule only runs from the repo default branch. Until this file is also on
-# `main`, use Actions → RSB 26.3 AppImage → Run workflow (branch rsb-weekly-wip).
+# Manual only: Actions → RSB 26.3 AppImage → Run workflow (branch rsb-weekly-wip).
 name: RSB 26.3 AppImage
 
 on:
@@ -17,14 +16,6 @@ on:
         description: Pack Linux AppImage and publish a prerelease
         type: boolean
         default: true
-  push:
-    branches: [rsb-weekly-wip]
-    paths-ignore:
-      - "**.md"
-      - "AGENTS.md"
-  schedule:
-    # Daily 12:00 UTC. No-op unless this workflow file exists on the default branch.
-    - cron: "0 12 * * *"
 
 concurrency:
   group: rsb-26-3-appimage
