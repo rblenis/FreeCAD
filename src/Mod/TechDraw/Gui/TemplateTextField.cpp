@@ -93,8 +93,12 @@ void TemplateTextField::mouseReleaseEvent(QGraphicsSceneMouseEvent *event)
         ss << "Edit field " << fieldName << " in " << tmplte->Label.getValue();
         App::GetApplication().setActiveTransaction({ ss.str(), false });
 
-        if (ui.exec() == QDialog::Accepted) {
-            tmplte->EditableTexts.setValue(fieldName, ui.getFieldContent().toStdString());
+        // Accepting the dialog without editing must not mark the document modified.
+        std::string newContent;
+        if (ui.exec() == QDialog::Accepted
+            && (newContent = ui.getFieldContent().toStdString())
+                != tmplte->EditableTexts.getValue(fieldName)) {
+            tmplte->EditableTexts.setValue(fieldName, newContent);
             App::GetApplication().closeActiveTransaction(App::TransactionCloseMode::Commit);
         }
         else {
