@@ -336,6 +336,16 @@ void QGIViewDimension::datumLabelDragFinished()
 
     double x = Rez::appX(datumLabel->X()), y = Rez::appX(datumLabel->Y());
 
+    // QGIDatumLabel reports a finished drag on mouse release or deselect after
+    // any position change, including the ones draw() makes. Selecting or
+    // deselecting a dimension then wrote the same X/Y and marked the document
+    // modified. Write only a position that moved.
+    constexpr double tolerance {1e-4};    // mm, far below any real drag
+    if (DrawUtil::fpCompare(dim->X.getValue(), x, tolerance)
+        && DrawUtil::fpCompare(dim->Y.getValue(), -y, tolerance)) {
+        return;
+    }
+
     int tid = Gui::Command::openActiveDocumentCommand(QT_TRANSLATE_NOOP("Command", "Drag Dimension"));
 
     Gui::Command::doCommand(Gui::Command::Doc, "App.ActiveDocument.%s.X = %f",
