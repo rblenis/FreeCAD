@@ -22,13 +22,19 @@
  *                                                                         *
  ***************************************************************************/
 
+# include <cmath>
+
 # include <QDomDocument>
+# include <QFont>
+# include <QFontMetricsF>
+# include <QPainterPath>
 # include <QFile>
 # include <QFontMetrics>
 # include <QGraphicsColorizeEffect>
 # include <QGraphicsEffect>
 # include <QGraphicsSvgItem>
 # include <QMap>
+# include <QPainter>
 # include <QPen>
 # include <QSvgRenderer>
 # include <QRegularExpression>
@@ -199,6 +205,240 @@ namespace {
 
         svgCode = doc.toByteArray();
     }
+
+// Template text is a few SVG units tall and the item is scaled ~10x to scene
+// units, so Qt rasterizes glyphs at 2-3 ppem with a ~10x transform. FreeType
+// 2.14 returns Raster_Overflow (0x62) for such glyphs (Noto Sans 'W' first),
+// and Qt retries and warns on every repaint. FreeType 2.13 does not. The
+// template is painted from a copy with its text converted to filled paths.
+
+// SVG presentation property: attribute first, then the style attribute.
+QString svgProp(const QDomElement& e, const QString& name)
+{
+    if (e.hasAttribute(name)) {
+        return e.attribute(name);
+    }
+    return parseStyle(e.attribute(QStringLiteral("style"))).value(name);
+}
+
+// Look on the tspan, then on its text element.
+QString svgRunProp(const QDomElement& run, const QDomElement& text, const QString& name)
+{
+    QString v = svgProp(run, name);
+    if (v.isEmpty() && run != text) {
+        v = svgProp(text, name);
+    }
+    return v;
+}
+
+double parseSvgFontPx(QString raw)
+{
+    raw = raw.trimmed();
+    if (raw.endsWith(QLatin1String("px"))) {
+        raw.chop(2);
+        return raw.toDouble();
+    }
+    if (raw.endsWith(QLatin1String("pt"))) {
+        raw.chop(2);
+        return raw.toDouble() * 96.0 / 72.0;
+    }
+    return raw.toDouble();
+}
+
+QFont svgOutlineFont(QString family, bool bold)
+{
+    family = family.trimmed();
+    family.remove(QLatin1Char('\''));
+    family.remove(QLatin1Char('"'));
+    QFont font;
+    font.setStyleStrategy(QFont::NoSubpixelAntialias);
+    font.setHintingPreference(QFont::PreferNoHinting);
+    if (family.isEmpty() || family == QLatin1String("sans-serif") || family == QLatin1String("sans")) {
+        font.setFamilies({QStringLiteral("Noto Sans"),
+                          QStringLiteral("DejaVu Sans"),
+                          QStringLiteral("Liberation Sans")});
+        font.setStyleHint(QFont::SansSerif);
+    }
+    else if (family == QLatin1String("serif")) {
+        font.setStyleHint(QFont::Serif);
+    }
+    else if (family == QLatin1String("monospace")) {
+        font.setStyleHint(QFont::TypeWriter);
+    }
+    else {
+        font.setFamily(family);
+    }
+    if (bold) {
+        font.setBold(true);
+    }
+    return font;
+}
+
+QString painterPathToSvg(const QPainterPath& path)
+{
+    QString d;
+    d.reserve(path.elementCount() * 20);
+    for (int i = 0; i < path.elementCount(); ++i) {
+        const QPainterPath::Element e = path.elementAt(i);
+        if (e.isMoveTo()) {
+            d += QStringLiteral("M%1 %2").arg(e.x, 0, 'f', 3).arg(e.y, 0, 'f', 3);
+        }
+        else if (e.isLineTo()) {
+            d += QStringLiteral("L%1 %2").arg(e.x, 0, 'f', 3).arg(e.y, 0, 'f', 3);
+        }
+        else if (e.isCurveTo()) {
+            const QPainterPath::Element c2 = path.elementAt(++i);
+            const QPainterPath::Element end = path.elementAt(++i);
+            d += QStringLiteral("C%1 %2 %3 %4 %5 %6")
+                     .arg(e.x, 0, 'f', 3)
+                     .arg(e.y, 0, 'f', 3)
+                     .arg(c2.x, 0, 'f', 3)
+                     .arg(c2.y, 0, 'f', 3)
+                     .arg(end.x, 0, 'f', 3)
+                     .arg(end.y, 0, 'f', 3);
+        }
+    }
+    return d;
+}
+
+QPainterPath svgTextOutline(const QString& content, const QFont& baseFont, double px, double x, double y)
+{
+    constexpr int kRefPx = 64;
+    QFont font(baseFont);
+    font.setPixelSize(kRefPx);
+    QPainterPath path;
+    path.addText(QPointF(0, 0), font, content);
+    QTransform xform;
+    xform.translate(x, y);
+    xform.scale(px / kRefPx, px / kRefPx);
+    return xform.map(path);
+}
+
+// Replace <text> with filled outlines. Returns the largest font size in SVG user units.
+double replaceSvgTextWithOutlines(QDomDocument& doc)
+{
+    double maxPx = 0.0;
+    const QDomNodeList list = doc.elementsByTagName(QStringLiteral("text"));
+    QList<QDomElement> texts;
+    texts.reserve(list.count());
+    for (int i = 0; i < list.count(); ++i) {
+        texts.append(list.at(i).toElement());
+    }
+
+    for (const QDomElement& textEl : texts) {
+
+        QDomElement group = doc.createElement(QStringLiteral("g"));
+        if (textEl.hasAttribute(QStringLiteral("transform"))) {
+            group.setAttribute(QStringLiteral("transform"), textEl.attribute(QStringLiteral("transform")));
+        }
+        if (textEl.hasAttribute(QStringLiteral("id"))) {
+            group.setAttribute(QStringLiteral("id"), textEl.attribute(QStringLiteral("id")));
+        }
+
+        auto appendRun = [&](const QString& content, const QDomElement& src, double fallbackX, double fallbackY) {
+            const QString trimmed = content.trimmed();
+            if (trimmed.isEmpty()) {
+                return;
+            }
+            const QString family = svgRunProp(src, textEl, QStringLiteral("font-family"));
+            const QString weight = svgRunProp(src, textEl, QStringLiteral("font-weight"));
+            const bool bold = weight == QLatin1String("bold") || weight.toInt() >= 600;
+            double px = parseSvgFontPx(svgRunProp(src, textEl, QStringLiteral("font-size")));
+            if (px <= 0.0) {
+                px = 3.5;
+            }
+            // QtSvg truncates the size to whole pixels (QFont::setPixelSize(int)).
+            // Match it so the outlined text keeps today's size on screen and in exports.
+            px = std::max(1.0, std::floor(px));
+            maxPx = std::max(maxPx, px);
+
+            const QString anchor = svgRunProp(src, textEl, QStringLiteral("text-anchor"));
+            double x = src.attribute(QStringLiteral("x"), textEl.attribute(QStringLiteral("x"))).toDouble();
+            double y = src.attribute(QStringLiteral("y"), textEl.attribute(QStringLiteral("y"))).toDouble();
+            if (!src.hasAttribute(QStringLiteral("x")) && !textEl.hasAttribute(QStringLiteral("x"))) {
+                x = fallbackX;
+            }
+            if (!src.hasAttribute(QStringLiteral("y")) && !textEl.hasAttribute(QStringLiteral("y"))) {
+                y = fallbackY;
+            }
+
+            const QFont font = svgOutlineFont(family, bold);
+            if (anchor == QLatin1String("middle") || anchor == QLatin1String("end")) {
+                QFont sized(font);
+                sized.setPixelSize(64);
+                const double width = QFontMetricsF(sized).horizontalAdvance(content) * (px / 64.0);
+                x -= (anchor == QLatin1String("middle")) ? width / 2.0 : width;
+            }
+
+            const QPainterPath path = svgTextOutline(content, font, px, x, y);
+            if (path.isEmpty()) {
+                return;
+            }
+            QDomElement pel = doc.createElement(QStringLiteral("path"));
+            pel.setAttribute(QStringLiteral("d"), painterPathToSvg(path));
+            QString fill = svgRunProp(src, textEl, QStringLiteral("fill"));
+            if (fill.isEmpty()) {
+                fill = QStringLiteral("#000000");
+            }
+            pel.setAttribute(QStringLiteral("fill"), fill);
+            pel.setAttribute(QStringLiteral("stroke"), QStringLiteral("none"));
+            group.appendChild(pel);
+        };
+
+        bool any = false;
+        for (QDomNode child = textEl.firstChild(); !child.isNull(); child = child.nextSibling()) {
+            if (child.isElement() && child.toElement().tagName() == QLatin1String("tspan")) {
+                appendRun(child.toElement().text(), child.toElement(), 0.0, 0.0);
+                any = true;
+            }
+            else if (child.isText()) {
+                const QString data = child.toText().data();
+                if (!data.trimmed().isEmpty()) {
+                    appendRun(data, textEl, 0.0, 0.0);
+                    any = true;
+                }
+            }
+        }
+        if (any && group.hasChildNodes()) {
+            textEl.parentNode().replaceChild(group, textEl);
+        }
+    }
+    return maxPx;
+}
+
+class OutlineSvgItem : public QGraphicsSvgItem
+{
+public:
+    explicit OutlineSvgItem(QGraphicsItem* parent = nullptr)
+        : QGraphicsSvgItem(parent)
+    {}
+    ~OutlineSvgItem() override
+    {
+        delete m_outline;
+    }
+
+    void setOutline(QByteArray svg, double maxFontPx)
+    {
+        delete m_outline;
+        m_outline = new QSvgRenderer();
+        m_outline->load(svg);
+        m_maxFontPx = maxFontPx;
+    }
+
+    void paint(QPainter* painter, const QStyleOptionGraphicsItem* option, QWidget* widget) override
+    {
+        if (m_outline && m_outline->isValid() && m_maxFontPx > 0.0) {
+            m_outline->render(painter, boundingRect());
+            return;
+        }
+        QGraphicsSvgItem::paint(painter, option, widget);
+    }
+
+private:
+    QSvgRenderer* m_outline = nullptr;
+    double m_maxFontPx = 0.0;
+};
+
 }  // anonymous namespace
 
 
@@ -206,7 +446,7 @@ using namespace TechDrawGui;
 using namespace TechDraw;
 
 QGISVGTemplate::QGISVGTemplate(QGSPage* scene) : QGITemplate(scene),
-    m_svgItem(new QGraphicsSvgItem(this)),
+    m_svgItem(new OutlineSvgItem(this)),
     m_svgRender(new QSvgRenderer()),
     m_pageRectangle(new QGraphicsRectItem(this))
 {
@@ -232,6 +472,15 @@ void QGISVGTemplate::load(QByteArray svgCode)
     prepareGeometryChange();
     applyWorkaround(svgCode);
     m_svgRender->load(svgCode);
+
+    // Second copy with <text> turned into filled paths. See svgProp above.
+    {
+        QDomDocument outlineDoc;
+        if (outlineDoc.setContent(svgCode)) {
+            const double maxPx = replaceSvgTextWithOutlines(outlineDoc);
+            static_cast<OutlineSvgItem*>(m_svgItem)->setOutline(outlineDoc.toByteArray(), maxPx);
+        }
+    }
 
     QSize size = m_svgRender->defaultSize();
     m_svgItem->setSharedRenderer(m_svgRender);
