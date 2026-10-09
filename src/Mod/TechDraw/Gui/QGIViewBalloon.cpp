@@ -618,6 +618,14 @@ void QGIViewBalloon::balloonLabelDragFinished()
     double x = Rez::appX(balloonLabel->getCenterX() / scale);
     double y = Rez::appX(balloonLabel->getCenterY() / scale);
 
+    // A click with a pixel of mouse jitter also ends here. Writing the same
+    // X/Y would mark the document modified, so write only a position that moved.
+    constexpr double tolerance {1e-4};    // mm, far below any real drag
+    if (!m_originDragged && DrawUtil::fpCompare(dvb->X.getValue(), x, tolerance)
+        && DrawUtil::fpCompare(dvb->Y.getValue(), -y, tolerance)) {
+        return;
+    }
+
     int tid = Gui::Command::openActiveDocumentCommand(QT_TRANSLATE_NOOP("Command", "Drag Balloon"));
 
     Gui::Command::doCommand(Gui::Command::Doc, "App.ActiveDocument.%s.X = %f",
