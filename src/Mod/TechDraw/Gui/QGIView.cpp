@@ -249,7 +249,9 @@ void QGIView::dragFinished()
         return;
     }
 
-    bool ownTransaction = (viewObj->getDocument()->getTransactionID(true) == 0);
+    // getTransactionID(true)==0 is true only when the undo stack is empty,
+    // not when there is no open transaction.
+    bool ownTransaction = !viewObj->getDocument()->hasPendingTransaction();
 
     if (ownTransaction) {
         viewObj->getDocument()->openTransaction("Drag view");
